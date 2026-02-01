@@ -2,7 +2,7 @@ name: Tide Walker Alert
 
 on:
   schedule:
-    # שעה 01:00 UTC = שעה 08:00 בבוקר תאילנד
+    # 01:00 UTC = 08:00 Thailand time
     - cron: '0 1 * * *'
   workflow_dispatch:
 
@@ -19,6 +19,8 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run Bot
         env:
+          # הנה השורות החשובות:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WORLDTIDES_KEY: ${{ secrets.WORLDTIDES_KEY }}  # <-- הוספנו את זה!
         run: python tide_bot.py
