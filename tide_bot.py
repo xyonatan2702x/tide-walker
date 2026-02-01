@@ -1,93 +1,108 @@
 import os
 import requests
-import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # הגדרות
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+WORLDTIDES_KEY = os.getenv('WORLDTIDES_KEY')
 
-# קואורדינטות הים ליד טונג סאלה
-LAT_SEA = 9.75  
-LON_SEA = 99.98 
+# קואורדינטות טונג סאלה (מרכז)
+LAT = 9.7126
+LON = 99.9912
 
-def get_sea_status():
-    url = f"https://marine-api.open-meteo.com/v1/marine?latitude={LAT_SEA}&longitude={LON_SEA}&hourly=wave_height&timezone=Asia%2FBangkok"
+def get_tide_extremes():
+    # WorldTides API
+    url = f"https://www.worldtides.info/api/v3?extremes&lat={LAT}&lon={LON}&key={WORLDTIDES_KEY}"
     
     try:
-        response = requests.get(url).json()
-        if 'hourly' not in response:
-            print("Error: No hourly data")
-            return None, None
-
-        hourly = response['hourly']
-        df = pd.DataFrame({
-            'time': hourly['time'],
-            'height': hourly['wave_height']
-        })
-        df['time'] = pd.to_datetime(df['time'])
+        response = requests.get(url)
+        data = response.json()
         
-        # סינון: רק זמנים מעכשיו ועד סוף היום
-        now = datetime.now()
-        end_of_day = now.replace(hour=23, minute=59, second=59)
-        today_data = df[(df['time'] >= now) & (df['time'] <= end_of_day)]
-        
-        if today_data.empty:
-            return None, None
+        if 'extremes' not in data:
+            return None
             
-        # מציאת הרגע הכי שקט (הכי נמוך) היום
-        min_row = today_data.loc[today_data['height'].idxmin()]
+        extremes = data['extremes']
+        # סינון: רק נקודות שפל (Low) עתידיות
+        now_timestamp = datetime.now().timestamp()
+        future_lows = [e for e in extremes if e['type'] == 'Low' and e['dt'] > now_timestamp]
         
-        return min_row['time'], min_row['height']
+        if not future_lows:
+            return None
+            
+        # לקיחת השפל הקרוב ביותר
+        next_low = future_lows[0]
         
-    except Exception as e:
-        print(f"Error: {e}")
-        return None, None
+        tide_time = datetime.fromtimestamp(next_low['dt'])
+        height = next_low['height'] # גובה ביחס לממוצע (Datum)
+        
+        return tide_time, height
 
-def interpret_conditions(height):
-    # פרשנות פשוטה לגובה הגלים
-    if height < 0.15:
-        return "🏝️ <b>ים פלטה (Glassy)!</b>\nתנאים מושלמים. המים כנראה נמוכים מאוד ורגועים."
-    elif height < 0.3:
-        return "✅ <b>ים רגוע</b>\nתנאים טובים להליכה במים (Sandbar Walk)."
+    except Exception as e:
+        print(f"API Error: {e}")
+        return None
+
+def get_beach_status(height):
+    """
+    פונקציה שמתרגמת את גובה המים למצב ההליכה בחופים הספציפיים
+    """
+    report = ""
+    
+    # --- 1. Ko Tae Nai Sandbar (השביל לאי) ---
+    if height < 0.3:
+        status_sandbar = "✅ <b>פתוח לגמרי</b> (חול יבש)"
     elif height < 0.6:
-        return "⚠️ <b>קצת גלי</b>\nהמים עשויים להיות עמוקים יותר."
+        status_sandbar = "⚠️ <b>עביר במים</b> (גובה ברכיים)"
     else:
-        return "🌊 <b>ים סוער</b>\nלא מומלץ להליכה."
+        status_sandbar = "❌ <b>סגור</b> (שחייה בלבד)"
+        
+    report += f"🏝️ <b>Ko Tae Nai Sandbar:</b>\n{status_sandbar}\n"
+
+    # --- 2. Ao Bang Charu (החוף הארוך) ---
+    if height < 0.8:
+        status_charu = "✅ <b>רחב ונוח</b> (מעולה לריצה/הליכה)"
+    elif height < 1.2:
+        status_charu = "⚠️ <b>רצועה צרה</b> (חול רטוב)"
+    else:
+        status_charu = "❌ <b>אין חוף</b> (המים עד החומה/עצים)"
+        
+    report += f"🏖️ <b>Ao Bang Charu:</b>\n{status_charu}"
+    
+    return report
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # שינוי חשוב: עוברים ל-HTML שהוא יותר יציב
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    
     try:
-        response = requests.post(url, json=payload)
-        # הדפסת התשובה כדי שנראה אם יש שגיאה
-        print(f"Telegram Response: {response.text}")
+        requests.post(url, json=payload)
     except Exception as e:
-        print(f"Connection Error: {e}")
+        print(f"Telegram Error: {e}")
 
 def main():
-    print("Running Tide Walker...")
-    best_time, min_height = get_sea_status()
+    print("Analyzing walking routes...")
+    result = get_tide_extremes()
     
-    if best_time:
-        time_str = best_time.strftime("%H:%M")
-        date_str = best_time.strftime("%d/%m")
-        status = interpret_conditions(min_height)
+    if result:
+        time, height = result
+        time_str = time.strftime("%H:%M")
+        date_str = time.strftime("%d/%m")
         
-        # בניית ההודעה ב-HTML (שימוש ב-<b> להדגשה)
+        # קבלת פירוט לפי חופים
+        beach_report = get_beach_status(height)
+        
         msg = (
-            f"🌊 <b>עדכון טונג סאלה</b> | {date_str} 🌊\n\n"
-            f"📉 השעה הכי רגועה היום: <b>{time_str}</b>\n"
-            f"📏 גובה גלים: <b>{min_height:.2f}m</b>\n\n"
-            f"{status}\n\n"
-            f"Join: @thongsala_tides"
+            f"🚶 <b>תחזית הליכות - טונג סאלה</b> | {date_str}\n"
+            f"──────────────────\n"
+            f"📉 שפל שיא בשעה: <b>{time_str}</b>\n"
+            f"📏 גובה מים: <b>{height:.2f}m</b>\n"
+            f"──────────────────\n"
+            f"{beach_report}\n\n"
+            f"טיול נעים! 🥥"
         )
-        print("Sending message...")
+        print("Sending Report...")
         send_telegram(msg)
     else:
-        print("No data available.")
+        print("No tide data found.")
 
 if __name__ == "__main__":
     main()
