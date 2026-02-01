@@ -12,14 +12,15 @@ LAT_SEA = 9.75
 LON_SEA = 99.98 
 
 def get_sea_status():
-    # שליפת נתונים מ-Open Meteo
     url = f"https://marine-api.open-meteo.com/v1/marine?latitude={LAT_SEA}&longitude={LON_SEA}&hourly=wave_height&timezone=Asia%2FBangkok"
     
     try:
         response = requests.get(url).json()
+        if 'hourly' not in response:
+            print("Error: No hourly data")
+            return None, None
+
         hourly = response['hourly']
-        
-        # יצירת טבלה
         df = pd.DataFrame({
             'time': hourly['time'],
             'height': hourly['wave_height']
@@ -46,18 +47,25 @@ def get_sea_status():
 def interpret_conditions(height):
     # פרשנות פשוטה לגובה הגלים
     if height < 0.15:
-        return "🏝️ **ים פלטה (Glassy)!**\nתנאים מושלמים. המים כנראה נמוכים מאוד ורגועים."
+        return "🏝️ <b>ים פלטה (Glassy)!</b>\nתנאים מושלמים. המים כנראה נמוכים מאוד ורגועים."
     elif height < 0.3:
-        return "✅ **ים רגוע**\nתנאים טובים להליכה במים (Sandbar Walk)."
+        return "✅ <b>ים רגוע</b>\nתנאים טובים להליכה במים (Sandbar Walk)."
     elif height < 0.6:
-        return "⚠️ **קצת גלי**\nהמים עשויים להיות עמוקים יותר."
+        return "⚠️ <b>קצת גלי</b>\nהמים עשויים להיות עמוקים יותר."
     else:
-        return "🌊 **ים סוער**\nלא מומלץ להליכה."
+        return "🌊 <b>ים סוער</b>\nלא מומלץ להליכה."
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
+    # שינוי חשוב: עוברים ל-HTML שהוא יותר יציב
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+    
+    try:
+        response = requests.post(url, json=payload)
+        # הדפסת התשובה כדי שנראה אם יש שגיאה
+        print(f"Telegram Response: {response.text}")
+    except Exception as e:
+        print(f"Connection Error: {e}")
 
 def main():
     print("Running Tide Walker...")
@@ -68,14 +76,15 @@ def main():
         date_str = best_time.strftime("%d/%m")
         status = interpret_conditions(min_height)
         
+        # בניית ההודעה ב-HTML (שימוש ב-<b> להדגשה)
         msg = (
-            f"🌊 **עדכון טונג סאלה** | {date_str} 🌊\n\n"
-            f"📉 השעה הכי רגועה היום: **{time_str}**\n"
-            f"📏 גובה גלים: **{min_height:.2f}m**\n\n"
+            f"🌊 <b>עדכון טונג סאלה</b> | {date_str} 🌊\n\n"
+            f"📉 השעה הכי רגועה היום: <b>{time_str}</b>\n"
+            f"📏 גובה גלים: <b>{min_height:.2f}m</b>\n\n"
             f"{status}\n\n"
             f"Join: @thongsala_tides"
         )
-        print(msg)
+        print("Sending message...")
         send_telegram(msg)
     else:
         print("No data available.")
