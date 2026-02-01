@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # הגדרות
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -11,73 +11,90 @@ WORLDTIDES_KEY = os.getenv('WORLDTIDES_KEY')
 LAT = 9.7126
 LON = 99.9912
 
+# --- הגדרת שעון תאילנד (UTC+7) ---
+THAI_OFFSET = timedelta(hours=7)
+
+def get_thai_now():
+    """מחזיר את הזמן הנוכחי בתאילנד"""
+    return datetime.utcnow() + THAI_OFFSET
+
+def to_thai_time(timestamp):
+    """ממיר חותמת זמן (Unix) לשעון תאילנד"""
+    return datetime.utcfromtimestamp(timestamp) + THAI_OFFSET
+
 def get_tide_data():
-    """שליפת נתונים משולבת עם טווח ביטחון של יומיים"""
-    # הרחבתי ל-days=2 כדי לא לפספס שפל אם אנחנו בסוף היום
+    # שים לב: אנחנו מבקשים נתונים ליומיים קדימה כדי לכסות את המעבר בין ימים
     url = f"https://www.worldtides.info/api/v3?extremes&heights&step=3600&days=2&lat={LAT}&lon={LON}&key={WORLDTIDES_KEY}"
     
     try:
         response = requests.get(url)
         data = response.json()
         
-        # בדיקת שגיאות מה-API
         if 'error' in data:
-            print(f"WorldTides API Error: {data['error']}")
+            print(f"API Error: {data['error']}")
             return None, None
-            
+
         if 'extremes' not in data or 'heights' not in data:
-            print(f"Missing data in response. Keys found: {data.keys()}")
             return None, None
             
-        # 1. מציאת השיא (הכי נמוך עתידי)
-        now_ts = datetime.now().timestamp()
+        # 1. מציאת השיא (השפל הכי נמוך שעדיין לא קרה)
+        now_thai = get_thai_now()
+        # אנחנו מסננים לפי ה-Timestamp (שהוא אוניברסלי)
+        now_ts = datetime.utcnow().timestamp()
+        
         lows = [e for e in data['extremes'] if e['type'] == 'Low' and e['dt'] > now_ts]
         
         best_low = None
         if lows:
+            # לוקחים את הראשון ברשימה
             best_low = lows[0]
-            best_low['time'] = datetime.fromtimestamp(best_low['dt'])
-        else:
-            print("No future low tide found in the next 48 hours.")
+            # ממירים את הזמן שלו לשעון תאילנד
+            best_low['time'] = to_thai_time(best_low['dt'])
 
-        # 2. מציאת גובה המים בבוקר (08:00)
+        # 2. מציאת גובה המים בבוקר (08:00 שעון תאילנד)
         morning_tide = None
-        target_hour = 8 
-        today_date = datetime.now().strftime('%Y-%m-%d')
+        target_hour = 8
+        
+        # אם מריצים את הבוט בערב (אחרי 20:00), אולי נרצה לראות את הבוקר של מחר?
+        # כרגע נשאיר את זה פשוט: הבוקר של "היום הנוכחי בתאילנד"
+        today_date_thai = now_thai.strftime('%Y-%m-%d')
         
         for h in data['heights']:
-            dt_object = datetime.fromtimestamp(h['dt'])
-            if dt_object.strftime('%Y-%m-%d') == today_date and dt_object.hour == target_hour:
-                morning_tide = {'time': dt_object, 'height': h['height']}
+            dt_thai = to_thai_time(h['dt'])
+            
+            # בדיקה: האם זה הבוקר של היום?
+            if dt_thai.strftime('%Y-%m-%d') == today_date_thai and dt_thai.hour == target_hour:
+                morning_tide = {'time': dt_thai, 'height': h['height']}
                 break
         
-        # גיבוי: אם לא מצאנו את 08:00 (אולי כבר צהריים?), ניקח את המדידה הכי קרובה לעכשיו
+        # גיבוי: אם לא מצאנו את 08:00 (אולי עכשיו כבר צהריים?), ניקח את המצב *עכשיו*
         if not morning_tide and data['heights']:
-             # מחפשים את המדידה הקרובה ביותר לזמן הנוכחי
-             current_time = datetime.now()
-             closest_height = min(data['heights'], key=lambda x: abs(datetime.fromtimestamp(x['dt']) - current_time))
-             morning_tide = {'time': datetime.fromtimestamp(closest_height['dt']), 'height': closest_height['height']}
+             # מוצאים את המדידה הכי קרובה לזמן הנוכחי
+             closest = min(data['heights'], key=lambda x: abs(to_thai_time(x['dt']) - now_thai))
+             morning_tide = {'time': to_thai_time(closest['dt']), 'height': closest['height']}
 
         return best_low, morning_tide
 
     except Exception as e:
-        print(f"Critical Error in get_tide_data: {e}")
+        print(f"Error: {e}")
         return None, None
 
 def get_weather(target_time):
-    # מזג אוויר
+    # ב-Open Meteo אנחנו מבקשים timezone=Asia/Bangkok ולכן הנתונים כבר בתאילנד
+    # אבל צריך להיזהר עם ההשוואה
     url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&timezone=Asia%2FBangkok"
     try:
         data = requests.get(url).json()
         hourly = data['hourly']
+        
+        # המרת הזמן לפורמט שה-API מחזיר (ISO ללא timezone offset כי ביקשנו בנגקוק)
         target_str = target_time.strftime('%Y-%m-%dT%H:00')
         
         if target_str in hourly['time']:
             index = hourly['time'].index(target_str)
             return hourly['temperature_2m'][index], hourly['relative_humidity_2m'][index], hourly['wind_speed_10m'][index]
         return "N/A", "N/A", "N/A"
-    except Exception as e:
-        print(f"Weather Error: {e}")
+    except:
         return "N/A", "N/A", "N/A"
 
 def get_morning_vibe(height):
@@ -103,29 +120,25 @@ def get_beach_details(height):
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        response = requests.post(url, json=payload)
-        print(f"Telegram status: {response.status_code}")
-    except Exception as e:
-        print(f"Telegram Connection Error: {e}")
+    requests.post(url, json=payload)
 
 def main():
-    print("Starting Tide Bot - Island Vibes Edition V2...")
     best_low, morning_tide = get_tide_data()
     
     if best_low:
-        peak_time = best_low['time']
+        peak_time = best_low['time'] # זה כבר בשעון תאילנד
         peak_height = best_low['height']
         temp, humidity, wind = get_weather(peak_time)
         beach_report = get_beach_details(peak_height)
         
         morning_msg = ""
         if morning_tide:
-            # אם השעה שמצאנו היא בבוקר, נשתמש בהודעת הבוקר. אחרת, נציין שזה המצב הנוכחי.
             m_time_obj = morning_tide['time']
+            # לוגיקה: אם השעה בין 06:00 ל-10:00 בבוקר
             if 6 <= m_time_obj.hour <= 10:
                 morning_msg = get_morning_vibe(morning_tide['height'])
             else:
+                # אם אנחנו כבר לא בבוקר (כמו עכשיו), נציג את המצב הנוכחי
                 morning_msg = f"⏱️ **המצב כרגע ({m_time_obj.strftime('%H:%M')}):** גובה {morning_tide['height']:.2f}m"
 
         date_str = peak_time.strftime("%d/%m")
@@ -145,7 +158,7 @@ def main():
         )
         send_telegram(msg)
     else:
-        print("Still No Data. Check logs above for specific error.")
+        print("No Data found")
 
 if __name__ == "__main__":
     main()
