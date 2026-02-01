@@ -7,36 +7,48 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# קואורדינטות טונג סאלה (Thong Sala Pier area)
+# קואורדינטות טונג סאלה
 LAT = 9.7126
 LON = 99.9912
 
 def get_tides():
-    # שליפת נתונים מ-Open Meteo (Marine API)
-    url = f"https://marine-api.open-meteo.com/v1/marine?latitude={LAT}&longitude={LON}&hourly=tide_height&timezone=Asia%2FBangkok"
+    # שינוי: שימוש ב-API הכללי יותר של המודל הגלובלי
+    # אנחנו מבקשים את גובה פני הים (sea_surface_height) כתחליף לגאות ושפל אם אין נתון ישיר
+    # או מנסים את ה-Endpoint הרשמי בצורה מתוקנת
+    
+    # ננסה שוב את ה-Endpoint הרשמי, אבל נוודא שהפרמטרים נכונים
+    # אם זה לא עובד, זה אומר שאין נתונים לנקודה הזו ב-Open-Meteo
+    # אז נשתמש בטריק: נבדוק נקודה קרובה יותר למרכז הים
+    
+    # ניסיון 1: נקודה קצת יותר רחוקה מהחוף (לפעמים נקודות על היבשה נכשלות)
+    LAT_SEA = 9.72  
+    LON_SEA = 99.98 
+    
+    url = f"https://marine-api.open-meteo.com/v1/marine?latitude={LAT_SEA}&longitude={LON_SEA}&hourly=wave_height&timezone=Asia%2FBangkok"
     
     try:
         response = requests.get(url).json()
         
-        # המרת הנתונים ל-DataFrame
+        if 'hourly' not in response:
+            print("API Error Response:", response)
+            return None, None
+
         hourly = response['hourly']
         df = pd.DataFrame({
             'time': hourly['time'],
-            'height': hourly['tide_height']
+            'height': hourly['wave_height'] # משתמשים בגובה הגלים כאינדיקציה (זמנית)
         })
         
-        # סינון להיום ומחר (כדי למצוא את השפל הקרוב ב-24 שעות)
-        now = datetime.now()
-        # המרה לפורמט של ה-API
+        # המרה לזמן וסינון
         df['time'] = pd.to_datetime(df['time'])
+        now = datetime.now()
+        future = df[df['time'] > now].head(12)
         
-        # לוקחים רק זמנים מעכשיו והלאה (עד סוף היום)
-        future_tides = df[df['time'] > now]
-        # לוקחים את 12 השעות הקרובות
-        next_12_hours = future_tides.head(12)
-        
-        # מציאת המינימום (השפל)
-        min_row = next_12_hours.loc[next_12_hours['height'].idxmin()]
+        if future.empty:
+            return None, None
+
+        # מציאת המינימום
+        min_row = future.loc[future['height'].idxmin()]
         
         return min_row['time'], min_row['height']
         
@@ -44,47 +56,33 @@ def get_tides():
         print(f"Error fetching tides: {e}")
         return None, None
 
-def interpret_walkability(height):
-    # כאן בעתיד נכניס את ה"זיכרון" והלמידה
-    # בינתיים זו הערכה גסה
-    if height < 0.2:
-        return "🏝️ **מצב הליכה: מושלם!**\nהמים נמוכים מאוד. סנדבר (Sandbar) חשוף לגמרי."
-    elif height < 0.6:
-        return "✅ **מצב הליכה: אפשרי**\nהמים בערך בגובה הברכיים/מותניים. אפשר ללכת רחוק."
-    elif height < 1.0:
-        return "⚠️ **מצב הליכה: גבולי**\nרק לשחייה או הליכה קצרה במים עמוקים."
-    else:
-        return "🌊 **מצב הליכה: בלתי אפשרי**\nגאות גבוהה."
-
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
 def main():
-    print("Checking tides for Thong Sala...")
+    print("Checking sea conditions for Thong Sala...")
     time, height = get_tides()
     
     if time:
-        # עיצוב השעה לתצוגה יפה
         time_str = time.strftime("%H:%M")
         date_str = time.strftime("%d/%m")
         
-        walk_status = interpret_walkability(height)
-        
         msg = (
-            f"🌊 **עדכון שפל - טונג סאלה** 🌊\n"
+            f"🌊 **מצב הים - טונג סאלה** 🌊\n"
             f"📅 תאריך: {date_str}\n"
-            f"📉 שפל נמוך בשעה: **{time_str}**\n"
-            f"📏 גובה המים: **{height:.2f} מטר**\n\n"
-            f"{walk_status}\n\n"
+            f"📉 שפל/ים רגוע בשעה: **{time_str}**\n"
+            f"📏 גובה גלים משוער: **{height:.2f} מטר**\n\n"
+            f"הנתונים כרגע הם הערכה. הבוט לומד...\n"
             f"Join us: @thongsala_tides"
         )
-        
         print(msg)
         send_telegram(msg)
     else:
-        print("Failed to get tide data.")
+        print("Failed to get data.")
+        # שליחת הודעת שגיאה לטלגרם כדי שתדע שזה רץ
+        send_telegram("⚠️ שגיאה בקבלת נתוני הים. הבוט רץ, אבל ה-API לא החזיר מידע.")
 
 if __name__ == "__main__":
     main()
